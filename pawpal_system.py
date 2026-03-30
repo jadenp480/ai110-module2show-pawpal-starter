@@ -1,13 +1,19 @@
 """
 PawPal+ — Core System
 Modular OOP backend for pet care scheduling.
+
+Classes:
+    Task      — a single care activity with frequency and completion tracking
+    Pet       — a pet that owns its own task list
+    Owner     — manages one or more pets and a daily time budget
+    Scheduler — the scheduling brain; pulls tasks from all of an owner's pets
 """
 
 from datetime import date as today_date
 
 
 # ---------------------------------------------------------------------------
-# Task categories and their scheduling weights (higher = higher priority tie-break)
+# Constants
 # ---------------------------------------------------------------------------
 CATEGORY_WEIGHT = {
     "medication": 6,
@@ -25,10 +31,108 @@ SENIOR_AGE = {
 
 
 # ---------------------------------------------------------------------------
+# Task
+# ---------------------------------------------------------------------------
+class Task:
+    """
+    Represents a single pet care activity.
+
+    Attributes:
+        title            (str)  — short name for the task
+        category         (str)  — one of the CATEGORY_WEIGHT keys
+        duration_minutes (int)  — how long the task takes
+        priority         (int)  — 1 (low) to 5 (critical)
+        frequency        (str)  — "once" | "daily" | "weekly" | "as_needed"
+        time_preference  (str)  — "morning" | "afternoon" | "evening" | None
+        notes            (str)  — optional free-text context
+        completed        (bool) — whether the task is done for today
+    """
+
+    VALID_CATEGORIES = list(CATEGORY_WEIGHT.keys())
+    VALID_FREQUENCIES = ["once", "daily", "weekly", "as_needed"]
+
+    def __init__(
+        self,
+        title: str,
+        category: str,
+        duration_minutes: int,
+        priority: int,
+        frequency: str = "daily",
+        time_preference: str = None,
+        notes: str = "",
+    ):
+        """Create a Task, validating category, priority, and frequency."""
+        if category not in self.VALID_CATEGORIES:
+            raise ValueError(
+                f"Invalid category '{category}'. "
+                f"Choose from: {self.VALID_CATEGORIES}"
+            )
+        if not (1 <= priority <= 5):
+            raise ValueError("Priority must be between 1 (low) and 5 (critical).")
+        if frequency not in self.VALID_FREQUENCIES:
+            raise ValueError(
+                f"Invalid frequency '{frequency}'. "
+                f"Choose from: {self.VALID_FREQUENCIES}"
+            )
+
+        self.title = title
+        self.category = category
+        self.duration_minutes = duration_minutes
+        self.priority = priority
+        self.frequency = frequency
+        self.time_preference = time_preference
+        self.notes = notes
+        self.completed = False
+
+    # ------------------------------------------------------------------
+    # State
+    # ------------------------------------------------------------------
+    def complete(self):
+        """Mark this task as done."""
+        self.completed = True
+
+    def reset(self):
+        """Clear the completion status (use at the start of a new day)."""
+        self.completed = False
+
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+    def get_priority_score(self) -> int:
+        """Return the numeric priority used by the Scheduler."""
+        return self.priority
+
+    def is_urgent(self) -> bool:
+        """Return True when priority is 4 or 5."""
+        return self.priority >= 4
+
+    def __str__(self) -> str:
+        """Return a compact, human-readable description of this task."""
+        status = "✓" if self.completed else "○"
+        urgency = " [URGENT]" if self.is_urgent() else ""
+        pref = f" ({self.time_preference})" if self.time_preference else ""
+        return (
+            f"[{status}][P{self.priority}] {self.title}{urgency} — "
+            f"{self.category}{pref}, {self.duration_minutes} min, {self.frequency}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Pet
 # ---------------------------------------------------------------------------
 class Pet:
-    """Represents the animal being cared for."""
+    """
+    Stores pet details and owns a list of Tasks.
+
+    Attributes:
+        name          (str)        — pet's name
+        species       (str)        — "dog" | "cat" | "other"
+        breed         (str)        — optional breed
+        age           (float)      — age in years
+        weight        (float)      — weight in lbs
+        special_needs (list[str])  — e.g. ["diabetic", "anxiety"]
+        tasks         (list[Task]) — all care tasks for this pet
+    """
 
     def __init__(
         self,
@@ -39,15 +143,44 @@ class Pet:
         weight: float = 0.0,
         special_needs: list = None,
     ):
+        """Create a Pet with an empty task list."""
         self.name = name
         self.species = species.lower()
         self.breed = breed
         self.age = age
         self.weight = weight
         self.special_needs = special_needs or []
+        self.tasks: list[Task] = []
+
+    # ------------------------------------------------------------------
+    # Task management
+    # ------------------------------------------------------------------
+    def add_task(self, task: Task):
+        """Attach a Task to this pet."""
+        self.tasks.append(task)
+
+    def remove_task(self, title: str):
+        """Remove a task by title (case-insensitive)."""
+        lower = title.lower()
+        self.tasks = [t for t in self.tasks if t.title.lower() != lower]
+
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+    def get_pending_tasks(self) -> list:
+        """Return tasks that are not yet completed."""
+        return [t for t in self.tasks if not t.completed]
+
+    def get_tasks_by_category(self, category: str) -> list:
+        """Return all tasks matching the given category."""
+        return [t for t in self.tasks if t.category == category]
+
+    def is_senior(self) -> bool:
+        """Return True if the pet's age meets the senior threshold for its species."""
+        return self.age >= SENIOR_AGE.get(self.species, 10)
 
     def get_info(self) -> str:
-        """Returns a formatted summary of the pet."""
+        """Return a formatted one-line summary of this pet."""
         parts = [f"{self.name} ({self.species}"]
         if self.breed:
             parts[0] += f", {self.breed}"
@@ -59,20 +192,25 @@ class Pet:
         if self.special_needs:
             parts.append(f"Special needs: {', '.join(self.special_needs)}")
         if self.is_senior():
-            parts.append("[Senior pet]")
+            parts.append("[Senior]")
+        pending = len(self.get_pending_tasks())
+        parts.append(f"{pending}/{len(self.tasks)} tasks pending")
         return " | ".join(parts)
-
-    def is_senior(self) -> bool:
-        """Returns True if the pet qualifies as a senior based on species and age."""
-        threshold = SENIOR_AGE.get(self.species, 10)
-        return self.age >= threshold
 
 
 # ---------------------------------------------------------------------------
 # Owner
 # ---------------------------------------------------------------------------
 class Owner:
-    """Represents the human caring for the pet."""
+    """
+    Manages one or more pets and a daily time budget.
+
+    Attributes:
+        name              (str)       — owner's name
+        available_minutes (int)       — total care time available per day
+        preferences       (dict)      — e.g. {"morning_person": True}
+        pets              (list[Pet]) — all pets this owner cares for
+    """
 
     def __init__(
         self,
@@ -80,181 +218,183 @@ class Owner:
         available_minutes: int = 120,
         preferences: dict = None,
     ):
+        """Create an Owner with an empty pet list."""
         self.name = name
         self.available_minutes = available_minutes
         self.preferences = preferences or {}
+        self.pets: list[Pet] = []
 
-    def get_info(self) -> str:
-        """Returns a formatted summary of the owner."""
-        return (
-            f"Owner: {self.name} | "
-            f"Daily time budget: {self.available_minutes} min"
-        )
+    # ------------------------------------------------------------------
+    # Pet management
+    # ------------------------------------------------------------------
+    def add_pet(self, pet: Pet):
+        """Add a pet to this owner's care list."""
+        self.pets.append(pet)
+
+    def remove_pet(self, name: str):
+        """Remove a pet by name (case-insensitive)."""
+        lower = name.lower()
+        self.pets = [p for p in self.pets if p.name.lower() != lower]
 
     def set_availability(self, minutes: int):
         """Update the owner's daily time budget."""
         self.available_minutes = minutes
 
+    # ------------------------------------------------------------------
+    # Cross-pet task access
+    # ------------------------------------------------------------------
+    def get_all_tasks(self) -> list:
+        """Return (Pet, Task) pairs for every task across all pets."""
+        return [(pet, task) for pet in self.pets for task in pet.tasks]
 
-# ---------------------------------------------------------------------------
-# Task
-# ---------------------------------------------------------------------------
-class Task:
-    """Represents a single pet care task."""
+    def get_all_pending_tasks(self) -> list:
+        """Return (Pet, Task) pairs for every incomplete task across all pets."""
+        return [(pet, task) for pet in self.pets for task in pet.get_pending_tasks()]
 
-    VALID_CATEGORIES = list(CATEGORY_WEIGHT.keys())
-
-    def __init__(
-        self,
-        title: str,
-        category: str,
-        duration_minutes: int,
-        priority: int,
-        time_preference: str = None,
-        notes: str = "",
-    ):
-        if category not in self.VALID_CATEGORIES:
-            raise ValueError(
-                f"Invalid category '{category}'. "
-                f"Choose from: {self.VALID_CATEGORIES}"
-            )
-        if not (1 <= priority <= 5):
-            raise ValueError("Priority must be between 1 (low) and 5 (critical).")
-
-        self.title = title
-        self.category = category
-        self.duration_minutes = duration_minutes
-        self.priority = priority
-        self.time_preference = time_preference  # "morning", "afternoon", "evening", or None
-        self.notes = notes
-
-    def get_priority_score(self) -> int:
-        """Returns the numeric priority (1–5) used by the scheduler."""
-        return self.priority
-
-    def is_urgent(self) -> bool:
-        """Returns True if the task has a priority of 4 or 5."""
-        return self.priority >= 4
-
-    def __str__(self) -> str:
-        urgency = " [URGENT]" if self.is_urgent() else ""
-        pref = f" ({self.time_preference})" if self.time_preference else ""
+    # ------------------------------------------------------------------
+    # Info
+    # ------------------------------------------------------------------
+    def get_info(self) -> str:
+        """Return a formatted summary of the owner."""
+        pet_names = ", ".join(p.name for p in self.pets) if self.pets else "none"
         return (
-            f"[P{self.priority}] {self.title}{urgency} — "
-            f"{self.category}{pref}, {self.duration_minutes} min"
+            f"Owner: {self.name} | "
+            f"Daily budget: {self.available_minutes} min | "
+            f"Pets: {pet_names}"
         )
 
 
 # ---------------------------------------------------------------------------
-# Schedule
+# Scheduler
 # ---------------------------------------------------------------------------
-class Schedule:
-    """Holds the daily task pool and generates a prioritized plan."""
+class Scheduler:
+    """
+    The scheduling brain.
 
-    def __init__(self, pet: Pet, owner: Owner, date: str = None):
-        self.pet = pet
+    Retrieves pending tasks from all of an owner's pets, fits them into the
+    owner's daily time budget ordered by priority, and tracks completion.
+
+    Attributes:
+        owner            (Owner)                      — source of pets + budget
+        date             (str)                        — date this plan is for
+        plan             (list[(Pet, Task)])           — scheduled (pet, task) pairs
+        skipped          (list[(Pet, Task, str)])      — skipped with reasons
+        _plan_generated  (bool)                       — True once generate_plan() runs
+    """
+
+    def __init__(self, owner: Owner, date: str = None):
+        """Create a Scheduler tied to an owner; date defaults to today."""
         self.owner = owner
-        self.tasks: list[Task] = []
-        self.plan: list[Task] = []
-        self.skipped: list[tuple[Task, str]] = []  # (task, reason)
         self.date = date or str(today_date.today())
-        self._plan_generated = False  # Fix 5: distinguish "not yet run" from "ran but empty"
+        self.plan: list[tuple] = []          # (Pet, Task)
+        self.skipped: list[tuple] = []       # (Pet, Task, reason)
+        self._plan_generated = False
 
-    def add_task(self, task: Task):
-        """Add a task to the pool."""
-        self.tasks.append(task)
-
-    def remove_task(self, title: str):
-        """Remove a task by title (case-insensitive) from the pool, plan, and skipped list."""
-        lower = title.lower()
-        self.tasks = [t for t in self.tasks if t.title.lower() != lower]
-        self.plan = [t for t in self.plan if t.title.lower() != lower]          # Fix 6
-        self.skipped = [(t, r) for t, r in self.skipped if t.title.lower() != lower]  # Fix 6
-
+    # ------------------------------------------------------------------
+    # Core algorithm
+    # ------------------------------------------------------------------
     def generate_plan(self):
-        """
-        Run the scheduling algorithm.
-
-        Strategy: Priority-first, time-constrained greedy sort.
-        1. Sort globally by effective priority desc (boosted by pet special_needs),
-           break ties by category weight desc.
-        2. Greedily fit tasks into available_minutes budget in priority order.
-        3. After allocation, sort the plan by time_preference for display,
-           respecting the owner's morning_person preference.
-        4. Record skipped tasks with a specific reason.
-        """
+        """Sort pending tasks by priority and greedily fit them into the owner's time budget."""
         self.plan = []
         self.skipped = []
-        self._plan_generated = True  # Fix 5
+        self._plan_generated = True
         budget = self.owner.available_minutes
         display_order = ["morning", "afternoon", "evening", None]
 
-        # Fix 2: flip display order if owner is explicitly NOT a morning person
         if self.owner.preferences.get("morning_person") is False:
             display_order = ["evening", "afternoon", "morning", None]
 
-        # Fix 1: boost medication/appointment priority by 1 (capped at 5) when pet has special needs
-        def effective_score(task: Task) -> tuple:
+        def effective_score(pair: tuple) -> tuple:
+            pet, task = pair
             score = task.priority
-            if self.pet.special_needs and task.category in ("medication", "appointment"):
+            if pet.special_needs and task.category in ("medication", "appointment"):
                 score = min(5, score + 1)
             return (score, CATEGORY_WEIGHT.get(task.category, 0))
 
-        # Fix 3: sort globally by priority — time preference is display-only, not allocation order
-        sorted_tasks = sorted(self.tasks, key=effective_score, reverse=True)
+        pending = self.owner.get_all_pending_tasks()
+        sorted_pairs = sorted(pending, key=effective_score, reverse=True)
 
-        # Fix 3 + Fix 4: allocate budget in strict priority order
         time_used = 0
-        for task in sorted_tasks:
+        for pet, task in sorted_pairs:
             if task.duration_minutes > budget:
-                # Fix 4: single task too long for the entire day — specific message
-                self.skipped.append((task, "task duration exceeds daily budget"))
+                self.skipped.append((pet, task, "task duration exceeds daily budget"))
             elif time_used + task.duration_minutes <= budget:
-                self.plan.append(task)
+                self.plan.append((pet, task))
                 time_used += task.duration_minutes
             else:
-                self.skipped.append((task, "not enough time remaining"))
+                self.skipped.append((pet, task, "not enough time remaining"))
 
-        # Fix 3: sort scheduled tasks by time preference for display only
+        # Sort plan by time_preference for display only
         self.plan.sort(
-            key=lambda t: display_order.index(
-                t.time_preference if t.time_preference in display_order else None
+            key=lambda pair: display_order.index(
+                pair[1].time_preference
+                if pair[1].time_preference in display_order
+                else None
             )
         )
 
+    # ------------------------------------------------------------------
+    # Completion tracking
+    # ------------------------------------------------------------------
+    def mark_complete(self, pet_name: str, task_title: str) -> bool:
+        """Mark a scheduled task done by pet name and task title; returns True if found."""
+        lower_pet = pet_name.lower()
+        lower_task = task_title.lower()
+        for pet, task in self.plan:
+            if pet.name.lower() == lower_pet and task.title.lower() == lower_task:
+                task.complete()
+                return True
+        return False
+
+    def mark_all_complete(self):
+        """Mark every scheduled task as complete."""
+        for _, task in self.plan:
+            task.complete()
+
+    def reset_day(self):
+        """Clear all task completions and wipe the plan so the day can start fresh."""
+        for pet in self.owner.pets:
+            for task in pet.tasks:
+                task.reset()
+        self.plan = []
+        self.skipped = []
+        self._plan_generated = False
+
+    # ------------------------------------------------------------------
+    # Reporting
+    # ------------------------------------------------------------------
     def total_scheduled_time(self) -> int:
-        """Returns the sum of duration_minutes for all scheduled tasks."""
-        return sum(t.duration_minutes for t in self.plan)
+        """Return the total minutes of all scheduled tasks."""
+        return sum(task.duration_minutes for _, task in self.plan)
 
     def get_plan_summary(self) -> str:
-        """Returns the ordered plan as a readable string."""
-        # Fix 7: distinguish "never generated" from "generated but all tasks skipped"
+        """Return the daily plan as a readable string."""
         if not self._plan_generated:
             return "No plan generated yet. Call generate_plan() first."
 
         lines = [
-            f"=== Daily Plan for {self.pet.name} ({self.date}) ===",
+            f"=== PawPal+ Daily Plan ({self.date}) ===",
             f"Owner: {self.owner.name} | "
             f"Time used: {self.total_scheduled_time()}/{self.owner.available_minutes} min",
             "",
         ]
 
         if not self.plan:
-            lines.append("  No tasks could be scheduled within the available time budget.")
+            lines.append("  No tasks could fit within the available time budget.")
         else:
-            for i, task in enumerate(self.plan, 1):
-                lines.append(f"  {i}. {task}")
+            for i, (pet, task) in enumerate(self.plan, 1):
+                lines.append(f"  {i}. [{pet.name}] {task}")
 
         if self.skipped:
-            lines.append("\n  [Skipped tasks]")
-            for task, reason in self.skipped:
-                lines.append(f"  - {task.title} ({reason})")
+            lines.append("\n  [Skipped]")
+            for pet, task, reason in self.skipped:
+                lines.append(f"  - [{pet.name}] {task.title} ({reason})")
 
         return "\n".join(lines)
 
     def explain_reasoning(self) -> str:
-        """Explains why tasks were ordered as they were."""
-        if not self._plan_generated:  # Fix 7
+        """Explain why the plan was built the way it was."""
+        if not self._plan_generated:
             return "No plan to explain. Call generate_plan() first."
 
         lines = ["=== Scheduling Reasoning ===", ""]
@@ -263,105 +403,32 @@ class Schedule:
             "Ties were broken by category importance: "
             "medication > appointment > feeding > walk > grooming > enrichment."
         )
-        if self.pet.special_needs:
+
+        # Mention any special-needs boosts
+        boosted_pets = [p for p in self.owner.pets if p.special_needs]
+        for pet in boosted_pets:
             lines.append(
-                f"Because {self.pet.name} has special needs "
-                f"({', '.join(self.pet.special_needs)}), medication and appointment "
-                "tasks received a +1 priority boost."
+                f"{pet.name} has special needs ({', '.join(pet.special_needs)}), "
+                "so their medication and appointment tasks received a +1 priority boost."
             )
+
+        # Mention morning_person preference
         pref = self.owner.preferences.get("morning_person")
-        if pref is False:
+        if pref is True:
             lines.append(
-                f"{self.owner.name} is not a morning person, so tasks are displayed "
-                "evening → afternoon → morning."
+                f"{self.owner.name} is a morning person — tasks display morning → afternoon → evening."
             )
-        elif pref is True:
+        elif pref is False:
             lines.append(
-                f"{self.owner.name} is a morning person, so tasks are displayed "
-                "morning → afternoon → evening."
+                f"{self.owner.name} is not a morning person — tasks display evening → afternoon → morning."
             )
+
         lines.append(
-            f"Tasks were fit into {self.owner.name}'s daily budget of "
-            f"{self.owner.available_minutes} minutes in priority order. "
+            f"Tasks were fit greedily into {self.owner.available_minutes} min budget. "
             "Time preference only affects display order, not which tasks are selected."
         )
-        if self.skipped:
-            for task, reason in self.skipped:
-                lines.append(f"Skipped '{task.title}': {reason}.")
-        return "\n".join(lines)
 
+        for pet, task, reason in self.skipped:
+            lines.append(f"Skipped '{task.title}' ({pet.name}): {reason}.")
 
-# ---------------------------------------------------------------------------
-# PawPalSystem  (Facade / coordinator)
-# ---------------------------------------------------------------------------
-class PawPalSystem:
-    """Top-level coordinator — single entry point for the app and CLI demo."""
-
-    def __init__(self):
-        self.owner: Owner = None
-        self.pet: Pet = None
-        self.schedule: Schedule = None
-
-    def setup(
-        self,
-        owner_name: str,
-        pet_name: str,
-        species: str,
-        available_minutes: int = 120,
-        pet_age: float = 0.0,
-        pet_breed: str = "",
-        pet_special_needs: list = None,
-    ):
-        """Initialize the owner, pet, and schedule."""
-        self.owner = Owner(name=owner_name, available_minutes=available_minutes)
-        self.pet = Pet(
-            name=pet_name,
-            species=species,
-            breed=pet_breed,
-            age=pet_age,
-            special_needs=pet_special_needs,
-        )
-        self.schedule = Schedule(pet=self.pet, owner=self.owner)
-
-    def add_task(
-        self,
-        title: str,
-        category: str,
-        duration_minutes: int,
-        priority: int,
-        time_preference: str = None,
-        notes: str = "",
-    ):
-        """Create a Task and add it to the schedule."""
-        if self.schedule is None:
-            raise RuntimeError("Call setup() before adding tasks.")
-        task = Task(
-            title=title,
-            category=category,
-            duration_minutes=duration_minutes,
-            priority=priority,
-            time_preference=time_preference,
-            notes=notes,
-        )
-        self.schedule.add_task(task)
-
-    def run_schedule(self) -> str:
-        """Generate the plan and return the summary string."""
-        if self.schedule is None:
-            raise RuntimeError("Call setup() before running the schedule.")
-        self.schedule.generate_plan()
-        return self.schedule.get_plan_summary()
-
-    def get_summary(self) -> str:
-        """Return a full system summary including pet/owner info and the plan."""
-        if self.owner is None or self.pet is None:
-            return "System not initialized. Call setup() first."
-        lines = [
-            self.owner.get_info(),
-            self.pet.get_info(),
-            "",
-            self.schedule.get_plan_summary() if self.schedule.plan else "(no plan generated)",
-            "",
-            self.schedule.explain_reasoning() if self.schedule.plan else "",
-        ]
         return "\n".join(lines)
