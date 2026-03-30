@@ -1,0 +1,79 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2868
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 classDiagram\
+    class Task \{\
+        +String title\
+        +String category\
+        +int duration_minutes\
+        +int priority\
+        +String frequency\
+        +String time_preference\
+        +String notes\
+        +bool completed\
+        +date due_date\
+        +complete()\
+        +reset()\
+        +next_occurrence() Task\
+        +get_priority_score() int\
+        +is_urgent() bool\
+        +__str__() String\
+    \}\
+\
+    class Pet \{\
+        +String name\
+        +String species\
+        +String breed\
+        +float age\
+        +float weight\
+        +List~String~ special_needs\
+        +List~Task~ tasks\
+        +add_task(task: Task)\
+        +remove_task(title: String)\
+        +get_pending_tasks() List~Task~\
+        +get_tasks_by_category(category: String) List~Task~\
+        +is_senior() bool\
+        +get_info() String\
+    \}\
+\
+    class Owner \{\
+        +String name\
+        +int available_minutes\
+        +dict preferences\
+        +List~Pet~ pets\
+        +add_pet(pet: Pet)\
+        +remove_pet(name: String)\
+        +set_availability(minutes: int)\
+        +get_all_tasks() List~tuple~\
+        +get_all_pending_tasks() List~tuple~\
+        +filter_by_pet(pet_name: String) List~tuple~\
+        +filter_by_status(completed: bool) List~tuple~\
+        +get_info() String\
+    \}\
+\
+    class Scheduler \{\
+        +Owner owner\
+        +String date\
+        +List~tuple~ plan\
+        +List~tuple~ skipped\
+        +bool _plan_generated\
+        +generate_plan()\
+        +mark_complete(pet_name: String, task_title: String) bool\
+        +mark_all_complete()\
+        +reset_day()\
+        +find_conflicts() List~String~\
+        +total_scheduled_time() int\
+        +get_plan_summary() String\
+        +explain_reasoning() String\
+    \}\
+\
+    Pet "1" *-- "*" Task : owns\
+    Owner "1" *-- "*" Pet : manages\
+    Scheduler --> Owner : reads budget + pets from\
+    Scheduler ..> Pet : appends recurrence tasks to\
+    Task ..> Task : next_occurrence() creates\
+}
