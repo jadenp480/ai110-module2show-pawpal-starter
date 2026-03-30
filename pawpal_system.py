@@ -9,7 +9,7 @@ Classes:
     Scheduler — the scheduling brain; pulls tasks from all of an owner's pets
 """
 
-from datetime import date as today_date
+from datetime import date as today_date, timedelta
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +83,7 @@ class Task:
         self.time_preference = time_preference
         self.notes = notes
         self.completed = False
+        self.due_date: today_date = today_date.today()
 
     # ------------------------------------------------------------------
     # State
@@ -94,6 +95,42 @@ class Task:
     def reset(self):
         """Clear the completion status (use at the start of a new day)."""
         self.completed = False
+
+    def next_occurrence(self) -> "Task":
+        """Return a new, incomplete Task scheduled for the next recurrence date.
+
+        Algorithm:
+            Uses a fixed interval map — {"daily": 1, "weekly": 7} — to compute
+            the next due_date as self.due_date + timedelta(days=interval).
+            All other attributes (title, category, duration, priority, etc.) are
+            copied verbatim so the new task is identical except for due_date and
+            the default completed=False.
+
+        Returns:
+            Task  — a fresh Task instance with due_date advanced by the interval.
+            None  — if frequency is "once" or "as_needed" (no automatic recurrence).
+
+        Frequency mapping:
+            daily      → due_date + 1 day
+            weekly     → due_date + 7 days
+            once       → None (task does not repeat)
+            as_needed  → None (recurrence is caller-managed)
+        """
+        intervals = {"daily": 1, "weekly": 7}
+        days = intervals.get(self.frequency)
+        if days is None:
+            return None
+        next_task = Task(
+            title=self.title,
+            category=self.category,
+            duration_minutes=self.duration_minutes,
+            priority=self.priority,
+            frequency=self.frequency,
+            time_preference=self.time_preference,
+            notes=self.notes,
+        )
+        next_task.due_date = self.due_date + timedelta(days=days)
+        return next_task
 
     # ------------------------------------------------------------------
     # Queries
@@ -113,7 +150,8 @@ class Task:
         pref = f" ({self.time_preference})" if self.time_preference else ""
         return (
             f"[{status}][P{self.priority}] {self.title}{urgency} — "
-            f"{self.category}{pref}, {self.duration_minutes} min, {self.frequency}"
+            f"{self.category}{pref}, {self.duration_minutes} min, "
+            f"{self.frequency}, due {self.due_date}"
         )
 
 
@@ -251,6 +289,43 @@ class Owner:
         """Return (Pet, Task) pairs for every incomplete task across all pets."""
         return [(pet, task) for pet in self.pets for task in pet.get_pending_tasks()]
 
+    def filter_by_pet(self, pet_name: str) -> list:
+        """Return all (Pet, Task) pairs belonging to a single named pet.
+
+        Algorithm:
+            Calls get_all_tasks() to obtain every (Pet, Task) pair across all
+            pets, then filters with a case-insensitive string comparison so
+            callers don't need to match capitalisation exactly.
+
+        Args:
+            pet_name (str): The pet's name to filter by (case-insensitive).
+
+        Returns:
+            list[tuple[Pet, Task]]: Pairs for the named pet; empty list if the
+            name is not found.
+        """
+        lower = pet_name.lower()
+        return [(pet, task) for pet, task in self.get_all_tasks()
+                if pet.name.lower() == lower]
+
+    def filter_by_status(self, completed: bool) -> list:
+        """Return all (Pet, Task) pairs whose completion status matches the argument.
+
+        Algorithm:
+            Calls get_all_tasks() to obtain every (Pet, Task) pair across all
+            pets, then keeps only those where task.completed equals the given
+            bool. Pass completed=False to see what still needs doing; pass
+            completed=True to review what has already been finished.
+
+        Args:
+            completed (bool): True to return finished tasks, False for pending.
+
+        Returns:
+            list[tuple[Pet, Task]]: Matching pairs; empty list if none match.
+        """
+        return [(pet, task) for pet, task in self.get_all_tasks()
+                if task.completed == completed]
+
     # ------------------------------------------------------------------
     # Info
     # ------------------------------------------------------------------
@@ -343,6 +418,9 @@ class Scheduler:
         for pet, task in self.plan:
             if pet.name.lower() == lower_pet and task.title.lower() == lower_task:
                 task.complete()
+                next_task = task.next_occurrence()
+                if next_task is not None:
+                    pet.add_task(next_task)
                 return True
         return False
 
@@ -359,6 +437,62 @@ class Scheduler:
         self.plan = []
         self.skipped = []
         self._plan_generated = False
+
+    # ------------------------------------------------------------------
+    # Conflict detection
+    # ------------------------------------------------------------------
+    def find_conflicts(self) -> list:
+        """Scan the plan for scheduling conflicts; return a list of warning strings.
+
+        Two conflict types are detected — neither raises an exception:
+          1. Same-pet conflict  — one pet has multiple tasks in the same time slot.
+          2. Slot overload      — total minutes in a slot exceed its capacity.
+
+        Slot capacities (minutes): morning=120, afternoon=120, evening=90, flexible=480.
+        Tasks with time_preference=None are treated as 'flexible' and only trigger
+        a same-pet warning, not an overload warning.
+        """
+        if not self._plan_generated:
+            return ["No plan generated yet. Call generate_plan() first."]
+
+        SLOT_CAPACITY = {"morning": 120, "afternoon": 120, "evening": 90}
+        warnings = []
+
+        # Group plan entries by time slot
+        from collections import defaultdict
+        slot_map = defaultdict(list)   # slot → [(pet_name, task_title, duration)]
+        for pet, task in self.plan:
+            slot = task.time_preference or "flexible"
+            slot_map[slot].append((pet.name, task.title, task.duration_minutes))
+
+        for slot, entries in slot_map.items():
+            # 1. Same-pet conflict
+            pet_tasks = defaultdict(list)
+            for pet_name, task_title, _ in entries:
+                pet_tasks[pet_name].append(task_title)
+            for pet_name, titles in pet_tasks.items():
+                if len(titles) > 1:
+                    joined = ", ".join(f"'{t}'" for t in titles)
+                    warnings.append(
+                        f"WARNING: {pet_name} has {len(titles)} tasks in the "
+                        f"'{slot}' slot: {joined}"
+                    )
+
+            # 2. Slot overload (skip 'flexible' — no meaningful capacity to check)
+            if slot in SLOT_CAPACITY:
+                total = sum(d for _, _, d in entries)
+                cap = SLOT_CAPACITY[slot]
+                if total > cap:
+                    task_list = ", ".join(
+                        f"{p}:'{t}' ({d}m)" for p, t, d in entries
+                    )
+                    warnings.append(
+                        f"WARNING: '{slot}' slot is overloaded — "
+                        f"{total} min scheduled, {cap} min capacity "
+                        f"({task_list})"
+                    )
+
+        return warnings
 
     # ------------------------------------------------------------------
     # Reporting
@@ -389,6 +523,12 @@ class Scheduler:
             lines.append("\n  [Skipped]")
             for pet, task, reason in self.skipped:
                 lines.append(f"  - [{pet.name}] {task.title} ({reason})")
+
+        conflicts = self.find_conflicts()
+        if conflicts:
+            lines.append("\n  [Conflict Warnings]")
+            for w in conflicts:
+                lines.append(f"  ! {w}")
 
         return "\n".join(lines)
 
