@@ -69,3 +69,39 @@ pip install -r requirements.txt
 5. Add tests to verify key behaviors.
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
+
+## Testing PawPal+
+
+### How to run
+
+```bash
+python3 -m pytest tests/ -v
+```
+
+### What the tests cover
+
+The suite contains **9 tests** across 5 categories:
+
+| # | Test | What it verifies |
+|---|------|-----------------|
+| 1 | `test_mark_complete_changes_task_status` | `Scheduler.mark_complete()` flips `task.completed` to `True` and returns `True` |
+| 2 | `test_add_task_increases_pet_task_count` | `Pet.add_task()` grows the task list by exactly 1 each call |
+| 3 | `test_plan_sorted_by_time_preference` | After `generate_plan()`, tasks appear in morning → afternoon → evening order |
+| 4 | `test_higher_priority_task_scheduled_before_lower` | When the budget fits only one task, the higher-priority task wins |
+| 5 | `test_daily_task_creates_next_occurrence_after_completion` | Completing a `daily` task auto-adds a new task with `due_date + 1 day` |
+| 6 | `test_once_task_does_not_recur_after_completion` | Completing a `once` task does **not** spawn a recurrence |
+| 7 | `test_same_pet_same_slot_triggers_conflict_warning` | Two tasks for the same pet in the same slot produce a conflict warning |
+| 8 | `test_slot_overload_triggers_conflict_warning` | Tasks totaling > 90 min in the evening slot trigger an overload warning |
+| 9 | `test_no_conflict_when_tasks_in_different_slots` | Tasks in separate slots produce zero warnings |
+
+### Latest results
+
+```
+9 passed in 0.01s
+```
+
+### Confidence Level
+
+**★★★★☆ (4/5)**
+
+The core scheduling behaviors — priority selection, time-slot display order, daily recurrence, one-time task cleanup, and both conflict types — are all tested and passing. One star is held back because the suite does not yet cover a few known edge cases: the special-needs priority boost capping at 5, the `weekly` recurrence interval, owner budget = 0 (all tasks skipped), and the `morning_person: false` display-order reversal. Those paths exist in the code but have no automated safety net yet.
